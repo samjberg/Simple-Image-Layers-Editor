@@ -200,43 +200,68 @@
         }
 
         // --- Core Rendering ---
+
+        /**
+         * This function now just delegates to the new, flexible renderer
+         * to draw on the main visible canvas.
+         */
         function renderCanvas() {
-            // Clear canvas
-            ctx.clearRect(0, 0, canvas.width, canvas.height);
+            renderToContext(ctx, canvas.width, canvas.height, true);
+        }
+
+        /**
+         * NEW: Flexible rendering function
+         * This function can render all layers to *any* canvas context,
+         * at *any* resolution, and can optionally draw the selection box.
+         * This is used for both the main canvas and the high-res export.
+         *
+         * @param {CanvasRenderingContext2D} targetCtx - The context to draw on.
+         * @param {number} targetWidth - The width of the target canvas.
+         * @param {number} targetHeight - The height of the target canvas.
+         * @param {boolean} drawActiveBox - Whether to draw the blue selection box.
+         */
+        function renderToContext(targetCtx, targetWidth, targetHeight, drawActiveBox) {
+            // Calculate the scale factor from the main *visible* canvas to the target canvas
+            // This is the core of the high-res export fix.
+            const scaleFactor = targetWidth / canvas.width;
+
+            // Clear target canvas
+            targetCtx.clearRect(0, 0, targetWidth, targetHeight);
             
-            // --- FIXED (Issue 1): Draw a proper checkerboard pattern for transparency ---
-            const checkerSize = 20;
-            for (let y = 0; y < canvas.height; y += checkerSize) {
-                for (let x = 0; x < canvas.width; x += checkerSize) {
-                    // Set fillStyle based on position
+            // Draw a checkerboard pattern
+            // Use 20px for main canvas, scale up for high-res export
+            const checkerSize = 20 * (drawActiveBox ? 1 : scaleFactor);
+            for (let y = 0; y < targetHeight; y += checkerSize) {
+                for (let x = 0; x < targetWidth; x += checkerSize) {
                     if ((Math.floor(x / checkerSize) + Math.floor(y / checkerSize)) % 2 === 0) {
-                        ctx.fillStyle = '#FFFFFF'; // White square
+                        targetCtx.fillStyle = '#FFFFFF';
                     } else {
-                        ctx.fillStyle = '#f0f0f0'; // Light gray square
+                        targetCtx.fillStyle = '#f0f0f0';
                     }
-                    ctx.fillRect(x, y, checkerSize, checkerSize);
+                    targetCtx.fillRect(x, y, checkerSize, checkerSize);
                 }
             }
 
             // Draw each layer from bottom (index 0) to top
             appState.layers.forEach(layer => {
-                ctx.save(); // Save context state
+                targetCtx.save(); // Save context state
+
+                const finalScale = layer.baseScale * layer.userScale;
+                
+                // --- CRITICAL FIX ---
+                // Calculate position and scale relative to the target canvas size
+                const exportX = layer.x * scaleFactor;
+                const exportY = layer.y * scaleFactor;
+                const exportScale = finalScale * scaleFactor;
 
                 // Apply transformations
-                ctx.globalAlpha = layer.opacity;
-
-                // --- CHANGED (Issue 2b): Calculate final scale ---
-                const finalScale = layer.baseScale * layer.userScale;
-
-                // Translate to the layer's center
-                ctx.translate(layer.x, layer.y);
-                // Rotate around the center
-                ctx.rotate(layer.rotation);
-                // Scale from the center
-                ctx.scale(finalScale, finalScale);
+                targetCtx.globalAlpha = layer.opacity;
+                targetCtx.translate(exportX, exportY);
+                targetCtx.rotate(layer.rotation);
+                targetCtx.scale(exportScale, exportScale);
 
                 // Draw the image centered on the transformed origin
-                ctx.drawImage(
+                targetCtx.drawImage(
                     layer.image,
                     -layer.originalWidth / 2,
                     -layer.originalHeight / 2,
@@ -244,33 +269,37 @@
                     layer.originalHeight
                 );
 
-                ctx.restore(); // Restore context state for the next layer
+                targetCtx.restore(); // Restore context state for the next layer
             });
 
             // Draw bounding box for the active layer
             const activeLayer = getActiveLayer();
-            if (activeLayer) {
-                ctx.save();
+            if (drawActiveBox && activeLayer) {
+                targetCtx.save();
                 
-                // --- CHANGED (Issue 2b): Use final scale for bounding box ---
                 const finalScale = activeLayer.baseScale * activeLayer.userScale;
+                const exportX = activeLayer.x * scaleFactor;
+                const exportY = activeLayer.y * scaleFactor;
+                const exportScale = finalScale * scaleFactor;
 
-                ctx.translate(activeLayer.x, activeLayer.y);
-                ctx.rotate(activeLayer.rotation);
-                ctx.scale(finalScale, finalScale);
+                targetCtx.translate(exportX, exportY);
+                targetCtx.rotate(activeLayer.rotation);
+                targetCtx.scale(exportScale, exportScale);
                 
-                ctx.strokeStyle = '#007bff';
-                ctx.lineWidth = 2 / finalScale; // Keep line width consistent
-                ctx.strokeRect(
+                targetCtx.strokeStyle = '#007bff';
+                // Keep line width consistent, relative to the *new* scale
+                targetCtx.lineWidth = 2 / exportScale; 
+                targetCtx.strokeRect(
                     -activeLayer.originalWidth / 2,
                     -activeLayer.originalHeight / 2,
                     activeLayer.originalWidth,
                     activeLayer.originalHeight
                 );
                 
-                ctx.restore();
+                targetCtx.restore();
             }
         }
+
 
         // --- UI Updates ---
         function updateLayerPanel() {
@@ -282,17 +311,14 @@
                 layerEl.className = `p-2 rounded-lg bg-white shadow-sm border-2 ${isActive ? 'border-blue-500' : 'border-transparent'}`;
                 layerEl.setAttribute('data-id', layer.id);
 
-                // --- MODIFIED: Removed Scale and Rotation sliders ---
                 layerEl.innerHTML = `
                     <p class="font-medium text-gray-700 truncate text-sm" title="${layer.name}">${layer.name}</p>
                     <div class="mt-2 space-y-2">
-                        <!-- Opacity -->
                         <div>
                             <label class="text-xs font-medium text-gray-500">Opacity</label>
                             <input type="range" class="w-full h-2 bg-gray-200 rounded-lg appearance-none cursor-pointer" min="0" max="1" step="0.01" value="${layer.opacity}" data-property="opacity">
                         </div>
                     </div>
-                    <!-- Actions -->
                     <div class="mt-2 grid grid-cols-3 gap-1">
                         <button class="text-xs py-1 px-2 bg-gray-100 hover:bg-gray-200 rounded" data-action="move-up">▲ Up</button>
                         <button class="text-xs py-1 px-2 bg-gray-100 hover:bg-gray-200 rounded" data-action="move-down">▼ Down</button>
@@ -315,20 +341,14 @@
                 const img = new Image();
                 img.onload = () => {
 
-                    // --- CHANGED (Issue 2a): Resize canvas if first image ---
                     if (appState.layers.length === 0) {
                         appState.canvasAspectRatio = img.width / img.height;
                         initializeCanvas(); // Resize canvas *before* calculating scale
                     }
 
-                    // --- *** FIXED *** ---
-                    // This is the fix for the "image is too big" problem.
-                    // This logic correctly calculates the scale to fit the image
-                    // within the canvas bounds, then applies the 75% sizing.
                     const widthScale = canvas.width / img.width;
                     const heightScale = canvas.height / img.height;
                     const baseScale = Math.min(widthScale, heightScale) * 0.75;
-                    // --- *** END FIX *** ---
 
                     const newLayer = {
                         id: Date.now(),
@@ -404,7 +424,6 @@
                     if (appState.activeLayerId === id) {
                         appState.activeLayerId = null;
                     }
-                    // --- CHANGED (Issue 2a): Reset aspect ratio if last layer deleted ---
                     if (appState.layers.length === 0) {
                         appState.canvasAspectRatio = 4 / 3; // Reset to default
                         initializeCanvas();
@@ -448,7 +467,6 @@
         }
 
         function isPointInLayer(x, y, layer) {
-            // --- CHANGED (Issue 2b): Use final scale for hit detection ---
             const finalScale = layer.baseScale * layer.userScale;
 
             const dx = x - layer.x;
@@ -468,37 +486,31 @@
             return ux >= -halfW && ux <= halfW && uy >= -halfH && uy <= halfH;
         }
 
-        // --- MODIFIED: Renamed to handleStart for clarity ---
         function handleStart(e) {
-            // Prevent default touch behaviors like scrolling
             if (e.touches) {
                 e.preventDefault();
             }
             
-            // --- Handle multi-touch gesture (scale/rotate) ---
             if (e.touches && e.touches.length === 2) {
                 const activeLayer = getActiveLayer();
-                if (!activeLayer) return; // Need an active layer to gesture
+                if (!activeLayer) return; 
 
-                appState.isDragging = false; // Stop any dragging
+                appState.isDragging = false; 
                 appState.isGesturing = true;
                 
                 const t1 = e.touches[0];
                 const t2 = e.touches[1];
 
-                // Calculate initial distance and angle
                 appState.gestureStartDist = Math.hypot(t2.clientX - t1.clientX, t2.clientY - t1.clientY);
                 appState.gestureStartAngle = Math.atan2(t2.clientY - t1.clientY, t2.clientX - t1.clientX);
                 
-                // Store initial layer state
                 appState.gestureStartScale = activeLayer.userScale;
                 appState.gestureStartRotation = activeLayer.rotation;
                 return;
             }
 
-            // --- Handle single-touch drag (or mouse drag) ---
-            if (e.touches && e.touches.length > 1) return; // Ignore if more than 2 touches or switching
-            if (e.button && e.button !== 0) return; // Ignore right-clicks
+            if (e.touches && e.touches.length > 1) return; 
+            if (e.button && e.button !== 0) return; 
 
             const coords = getEventCoords(e);
             if (!coords) return;
@@ -533,7 +545,7 @@
             if (layerClicked) {
                 const layerToDrag = getActiveLayer();
                 appState.isDragging = true;
-                appState.isGesturing = false; // Ensure gesture is off
+                appState.isGesturing = false; 
                 canvas.classList.add('grabbing');
                 appState.dragStartX = coords.x;
                 appState.dragStartY = coords.y;
@@ -542,9 +554,7 @@
             }
         }
 
-        // --- MODIFIED: Renamed to handleMove for clarity ---
         function handleMove(e) {
-            // --- Handle multi-touch gesture ---
             if (e.touches && e.touches.length === 2 && appState.isGesturing) {
                 e.preventDefault();
                 const activeLayer = getActiveLayer();
@@ -553,12 +563,10 @@
                 const t1 = e.touches[0];
                 const t2 = e.touches[1];
 
-                // --- Scale Logic ---
                 const currentDist = Math.hypot(t2.clientX - t1.clientX, t2.clientY - t1.clientY);
                 const scaleDelta = currentDist / appState.gestureStartDist;
                 activeLayer.userScale = appState.gestureStartScale * scaleDelta;
                 
-                // --- Rotation Logic ---
                 const currentAngle = Math.atan2(t2.clientY - t1.clientY, t2.clientX - t1.clientX);
                 const angleDelta = currentAngle - appState.gestureStartAngle;
                 activeLayer.rotation = appState.gestureStartRotation + angleDelta;
@@ -567,7 +575,6 @@
                 return;
             }
 
-            // --- Handle single-touch drag ---
             if (appState.isDragging && (!e.touches || e.touches.length === 1)) {
                 e.preventDefault();
                 const coords = getEventCoords(e);
@@ -585,9 +592,7 @@
             }
         }
 
-        // --- MODIFIED: Renamed to handleEnd for clarity ---
         function handleEnd(e) {
-            // Check remaining touches
             const remainingTouches = e.touches ? e.touches.length : 0;
 
             if (remainingTouches < 2) {
@@ -614,27 +619,50 @@
 
         // --- Global Actions ---
         
+        /**
+         * MODIFIED: Export button logic is completely new.
+         * It now renders to an offscreen, high-resolution canvas.
+         */
         exportBtn.addEventListener('click', () => {
-            const currentActiveId = appState.activeLayerId;
-            appState.activeLayerId = null;
-            renderCanvas(); 
+            if (appState.layers.length === 0) {
+                alert("Cannot export an empty canvas.");
+                return;
+            }
 
-            const dataUrl = canvas.toDataURL('image/png');
+            // Get the bottom layer (index 0) to determine export size
+            const bottomLayer = appState.layers[0];
+            const exportWidth = bottomLayer.originalWidth;
+            const exportHeight = bottomLayer.originalHeight;
+
+            console.log(`Exporting at ${exportWidth}x${exportHeight}...`);
+
+            // 1. Create an offscreen (in-memory) canvas
+            const exportCanvas = document.createElement('canvas');
+            exportCanvas.width = exportWidth;
+            exportCanvas.height = exportHeight;
+            const exportCtx = exportCanvas.getContext('2d');
+            
+            // 2. Render all layers to the high-res offscreen canvas
+            // We pass 'false' to disable drawing the active layer's selection box
+            renderToContext(exportCtx, exportWidth, exportHeight, false);
+
+            // 3. Get the data URL from the new high-res canvas
+            const dataUrl = exportCanvas.toDataURL('image/png');
             const link = document.createElement('a');
             link.download = 'edited-image.png';
             link.href = dataUrl;
             link.click();
 
-            appState.activeLayerId = currentActiveId;
-            renderCanvas();
+            console.log("Export complete.");
+            
+            // We don't need to touch the main canvas, so no re-rendering is needed.
         });
 
         clearBtn.addEventListener('click', () => {
             appState.layers = [];
             appState.activeLayerId = null;
-            // --- CHANGED (Issue 2a): Reset aspect ratio on clear ---
             appState.canvasAspectRatio = 4 / 3;
-            initializeCanvas(); // Re-initializes canvas with default ratio
+            initializeCanvas(); 
             updateLayerPanel();
         });
 
